@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  ArrowDownToLine, ArrowRight, BarChart3, Check, ChevronDown, CircleAlert, CircleHelp, Clock3, CloudSun,
-  Command, FilePlus2, Filter, Leaf, Menu, MoreHorizontal, Plus, Search, Sprout, Tractor,
+  ArrowDownToLine, ArrowRight, BarChart3, Check, CircleAlert, CircleHelp, Clock3, CloudSun,
+  Command, FilePlus2, Filter, Leaf, LogOut, Menu, MoreHorizontal, Plus, Search, Sprout, Tractor,
   TrendingUp, Wheat, X,
 } from 'lucide-react';
 import { api } from './api.js';
@@ -30,12 +30,12 @@ function prettyDate(value) {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleDateString('en', { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
-function Field({ label, name, value, onChange, type = 'text', required = false, children, placeholder, min }) {
+function Field({ label, name, value, onChange, type = 'text', required = false, children, placeholder, min, step }) {
   return (
     <label className="field">
       <span>{label}{required && <b className="required"> *</b>}</span>
       {children || (
-        <input name={name} type={type} defaultValue={value} onChange={onChange} required={required} placeholder={placeholder} min={min} />
+        <input name={name} type={type} defaultValue={value} onChange={onChange} required={required} placeholder={placeholder} min={min} step={step} />
       )}
     </label>
   );
@@ -65,10 +65,52 @@ function EmptyState({ title, detail, action }) {
   return <div className="empty-state"><div className="empty-icon"><Sprout size={23} /></div><h3>{title}</h3><p>{detail}</p>{action}</div>;
 }
 
+function initials(name) {
+  return `${name || 'User'}`.trim().split(/\s+/).slice(0, 2).map((part) => part[0]).join('').toUpperCase();
+}
+
+function AuthPage({ onSubmit, busy, error }) {
+  const [mode, setMode] = useState('login');
+  const isRegistering = mode === 'register';
+
+  function submit(event) {
+    event.preventDefault();
+    if (!event.currentTarget.reportValidity()) return;
+    onSubmit(mode, Object.fromEntries(new FormData(event.currentTarget).entries()));
+  }
+
+  return (
+    <main className="auth-shell">
+      <section className="auth-card">
+        <div className="auth-brand">
+          <span className="brand-mark"><Leaf size={21} strokeWidth={2.5} /></span>
+          <span>fieldwise<small>HARVEST MANAGEMENT</small></span>
+        </div>
+        <span className="eyebrow">FIELDWISE WORKSPACE</span>
+        <h1>{isRegistering ? 'Create your farmer account' : 'Welcome back'}</h1>
+        <p className="auth-intro">{isRegistering ? 'Create an account to manage your crops and harvests.' : 'Sign in to continue to your crop and harvest workspace.'}</p>
+        {error && <div className="error-banner auth-error" role="alert">{error}</div>}
+        <form className="auth-form" onSubmit={submit}>
+          {isRegistering && <label className="field"><span>Your name<b className="required"> *</b></span><input name="name" autoComplete="name" required maxLength="100" /></label>}
+          <label className="field"><span>Email address<b className="required"> *</b></span><input name="email" type="email" autoComplete="email" required maxLength="320" /></label>
+          <label className="field"><span>Password<b className="required"> *</b></span><input name="password" type="password" autoComplete={isRegistering ? 'new-password' : 'current-password'} required minLength={isRegistering ? 12 : undefined} maxLength="72" /></label>
+          <button className="button button-primary auth-submit" type="submit" disabled={busy}>{busy ? <><span className="spinner" /> {isRegistering ? 'Creating account…' : 'Signing in…'}</> : isRegistering ? 'Create farmer account' : 'Sign in'}</button>
+        </form>
+        <p className="auth-switch">{isRegistering ? 'Already have an account?' : 'New to Fieldwise?'} <button type="button" onClick={() => setMode(isRegistering ? 'login' : 'register')}>{isRegistering ? 'Sign in' : 'Create an account'}</button></p>
+        <p className="auth-footnote">New registrations receive farmer access. Administrator accounts are provisioned securely by the system owner.</p>
+      </section>
+    </main>
+  );
+}
+
 function App() {
   const [page, setPage] = useState('dashboard');
   const [crops, setCrops] = useState([]);
   const [harvests, setHarvests] = useState([]);
+  const [user, setUser] = useState(null);
+  const [authReady, setAuthReady] = useState(false);
+  const [authBusy, setAuthBusy] = useState(false);
+  const [authError, setAuthError] = useState('');
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -86,13 +128,38 @@ function App() {
       setCrops(cropData);
       setHarvests(harvestData);
     } catch (error) {
+      if (error.status === 401) {
+        setUser(null);
+        setCrops([]);
+        setHarvests([]);
+        return;
+      }
       setLoadError(error.message);
     } finally {
       setLoading(false);
     }
   }, []);
 
-  useEffect(() => { refresh(); }, [refresh]);
+  useEffect(() => {
+    let active = true;
+    async function restoreSession() {
+      try {
+        const currentUser = await api.getCurrentUser();
+        if (!active) return;
+        setUser(currentUser);
+        if (currentUser) await refresh();
+      } catch (error) {
+        if (active) setAuthError(error.message);
+      } finally {
+        if (active) {
+          setLoading(false);
+          setAuthReady(true);
+        }
+      }
+    }
+    restoreSession();
+    return () => { active = false; };
+  }, [refresh]);
   useEffect(() => {
     if (!toast) return undefined;
     const timer = window.setTimeout(() => setToast(''), 3600);
@@ -172,6 +239,35 @@ function App() {
     }
   }
 
+  async function authenticate(mode, credentials) {
+    setAuthBusy(true);
+    setAuthError('');
+    try {
+      const authenticatedUser = mode === 'register'
+        ? await api.register(credentials)
+        : await api.login(credentials);
+      setUser(authenticatedUser);
+      setToast(mode === 'register' ? 'Farmer account created.' : 'Signed in successfully.');
+      await refresh();
+    } catch (error) {
+      setAuthError(error.message);
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
+  async function signOut() {
+    try {
+      await api.logout();
+      setUser(null);
+      setCrops([]);
+      setHarvests([]);
+      setToast('');
+    } catch (error) {
+      setToast(`Unable to sign out: ${error.message}`);
+    }
+  }
+
   function renderCropForm() {
     return (
       <Modal title={modal.item ? 'Edit crop' : 'Add a crop'} onClose={() => setModal(null)} onSubmit={submitForm} submitLabel={modal.item ? 'Save changes' : 'Add crop'} busy={busy}>
@@ -179,7 +275,7 @@ function App() {
         <Field label="Crop type" name="type" value={modal.values.type} required placeholder="e.g. Cereal" />
         <Field label="Variety" name="variety" value={modal.values.variety} required placeholder="e.g. HD 2967" />
         <Field label="Field location" name="location" value={modal.values.location} required placeholder="Village, district" />
-        <Field label="Cultivated area (acres)" name="area" value={modal.values.area} type="number" min="0.01" required placeholder="0.0" />
+        <Field label="Cultivated area (acres)" name="area" value={modal.values.area} type="number" min="0.01" step="0.01" required placeholder="0.0" />
         <Field label="Sowing date" name="plantingDate" value={modal.values.plantingDate} type="date" required />
         <Field label="Expected harvest date" name="expectedHarvest" value={modal.values.expectedHarvest} type="date" required />
         <Field label="Farmer name" name="farmerName" value={modal.values.farmerName} required placeholder="Full name" />
@@ -198,7 +294,7 @@ function App() {
         <Field label="Farm location" name="location" value={modal.values.location} required placeholder="Village, district" />
         <Field label="Planned harvest date" name="plannedHarvestDate" value={modal.values.plannedHarvestDate} type="date" required />
         <Field label="Actual harvest date" name="actualHarvestDate" value={modal.values.actualHarvestDate} type="date" />
-        <Field label="Quantity harvested (kg)" name="quantity" value={modal.values.quantity} type="number" min="0.01" required placeholder="0" />
+        <Field label="Quantity harvested (kg)" name="quantity" value={modal.values.quantity} type="number" min="0.01" step="0.01" required placeholder="0" />
         <Field label="Record status" name="status">
           <select name="status" defaultValue={modal.values.status}><option>Pending</option><option>Completed</option></select>
         </Field>
@@ -214,6 +310,13 @@ function App() {
     harvests: 'Track every harvest from the field to the record.',
     about: 'A practical digital workspace for growing operations.',
   }[page];
+
+  if (!authReady) {
+    return <main className="auth-loading"><span className="spinner spinner-dark" />Checking your sign-in session…</main>;
+  }
+  if (!user) {
+    return <AuthPage onSubmit={authenticate} busy={authBusy} error={authError} />;
+  }
 
   return (
     <div className="app-shell">
@@ -236,7 +339,7 @@ function App() {
             <strong>Every season starts<br />with a good plan.</strong>
             <span className="weather-caption">Your fields, all in one place.</span>
           </div>
-          <div className="sidebar-user"><div className="avatar">FW</div><div><strong>Farm workspace</strong><span>Local operations</span></div><ChevronDown size={16} /></div>
+          <div className="sidebar-user"><div className="avatar">{initials(user.name)}</div><div><strong>{user.name}</strong><span>{user.role === 'ADMIN' ? 'Administrator' : 'Farmer'}</span></div><button className="icon-button sign-out-button" type="button" onClick={signOut} aria-label="Sign out" title="Sign out"><LogOut size={16} /></button></div>
         </div>
       </aside>
 
@@ -245,7 +348,7 @@ function App() {
         <header className="topbar">
           <button className="icon-button menu-button" aria-label="Open menu" onClick={() => setMobileNavOpen(true)}><Menu size={20} /></button>
           <div className="breadcrumb"><span>Workspace</span><span className="crumb-slash">/</span><strong>{pageTitle}</strong></div>
-          <div className="topbar-right"><span className={`connection-dot ${loadError ? 'connection-error' : ''}`} /><span className="connection-label">{loadError ? 'API unavailable' : loading ? 'Connecting to API' : 'API connected'}</span><span className="topbar-divider" /><div className="avatar avatar-small">FW</div></div>
+          <div className="topbar-right"><span className={`connection-dot ${loadError ? 'connection-error' : ''}`} /><span className="connection-label">{loadError ? 'API unavailable' : loading ? 'Connecting to API' : 'API connected'}</span><span className="topbar-divider" /><div className="avatar avatar-small" title={user.email}>{initials(user.name)}</div></div>
         </header>
         <div className="content">
           <section className="page-heading">

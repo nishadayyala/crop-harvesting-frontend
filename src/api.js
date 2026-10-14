@@ -1,15 +1,48 @@
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '/api').replace(/\/$/, '');
 
+let csrfToken;
+
+async function getCsrfToken() {
+  if (csrfToken) return csrfToken;
+  let response;
+  try {
+    response = await fetch(`${API_BASE_URL}/auth/csrf`, {
+      headers: { Accept: 'application/json' },
+      credentials: 'include',
+    });
+  } catch {
+    throw new Error(`Unable to reach the API at ${API_BASE_URL}. Check that the backend is running and reachable.`);
+  }
+  if (!response.ok) {
+    throw new Error(`Unable to prepare a secure request (${response.status} ${response.statusText}).`);
+  }
+  csrfToken = await response.json();
+  if (!csrfToken?.token || !csrfToken?.headerName) {
+    csrfToken = null;
+    throw new Error('The API did not provide a CSRF token for secure requests.');
+  }
+  return csrfToken;
+}
+
 async function request(path, options = {}) {
+  const method = options.method || 'GET';
+  const headers = {
+    Accept: 'application/json',
+    ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+    ...options.headers,
+  };
+  const safeMethod = ['GET', 'HEAD', 'OPTIONS'].includes(method.toUpperCase());
+  if (!safeMethod) {
+    const token = await getCsrfToken();
+    headers[token.headerName] = token.token;
+  }
+
   let response;
   try {
     response = await fetch(`${API_BASE_URL}${path}`, {
       ...options,
-      headers: {
-        Accept: 'application/json',
-        ...(options.body ? { 'Content-Type': 'application/json' } : {}),
-        ...options.headers,
-      },
+      headers,
+      credentials: 'include',
     });
   } catch {
     throw new Error(`Unable to reach the API at ${API_BASE_URL}. Check that the backend is running and reachable.`);
@@ -26,9 +59,14 @@ async function request(path, options = {}) {
         // Keep the response text when the server's JSON error body is malformed.
       }
     }
-    throw new Error(details || `The server returned ${response.status} ${response.statusText}.`);
+    const error = new Error(details || `The server returned ${response.status} ${response.statusText}.`);
+    error.status = response.status;
+    throw error;
   }
 
+  if (path.startsWith('/auth/login') || path.startsWith('/auth/register') || path.startsWith('/auth/logout')) {
+    csrfToken = null;
+  }
   if (response.status === 204) return null;
   const contentType = response.headers.get('content-type') || '';
   if (!contentType.includes('application/json')) return null;
@@ -95,6 +133,23 @@ function harvestRequest(harvest) {
 }
 
 export const api = {
+  async getCurrentUser() {
+    try {
+      return await request('/auth/me');
+    } catch (error) {
+      if (error.status === 401) return null;
+      throw error;
+    }
+  },
+  async login(credentials) {
+    return request('/auth/login', { method: 'POST', body: JSON.stringify(credentials) });
+  },
+  async register(details) {
+    return request('/auth/register', { method: 'POST', body: JSON.stringify(details) });
+  },
+  async logout() {
+    return request('/auth/logout', { method: 'POST' });
+  },
   async getCrops() {
     return toList(await request('/crops'), 'crops').map(normalizeCrop);
   },
