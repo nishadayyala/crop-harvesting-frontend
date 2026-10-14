@@ -1,0 +1,8 @@
+{
+  "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "https://crop-harvesting-backend.onrender.com/api/:path*"
+    }
+  ]
+}

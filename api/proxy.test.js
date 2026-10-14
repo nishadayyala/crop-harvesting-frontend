@@ -1,116 +1,41 @@
 import assert from 'node:assert/strict';
-import { Readable, Writable } from 'node:stream';
+import { readFile } from 'node:fs/promises';
 import test from 'node:test';
-import handler from './[...path].js';
 
-function makeRequest({ method = 'GET', url = '/api/auth/me', headers = {}, body = '' } = {}) {
-  const request = Readable.from(body ? [Buffer.from(body)] : []);
-  request.method = method;
-  request.url = url;
-  request.headers = headers;
-  return request;
-}
+const config = JSON.parse(await readFile(new URL('../vercel.json', import.meta.url), 'utf8'));
 
-function makeResponse() {
-  const chunks = [];
-  const response = new Writable({
-    write(chunk, encoding, callback) {
-      chunks.push(Buffer.from(chunk));
-      callback();
-    },
-  });
-  response.headers = new Map();
-  response.setHeader = (name, value) => response.headers.set(name.toLowerCase(), value);
-  response.getHeader = (name) => response.headers.get(name.toLowerCase());
-  response.bodyText = () => Buffer.concat(chunks).toString('utf8');
-  return response;
-}
-
-async function runHandler(request) {
-  const response = makeResponse();
-  await handler(request, response);
-  if (!response.writableEnded) {
-    await new Promise((resolve, reject) => {
-      response.once('finish', resolve);
-      response.once('error', reject);
-    });
+function rewritePath(path) {
+  for (const rewrite of config.rewrites) {
+    const sourcePattern = new RegExp(`^${rewrite.source.replace(':path*', '(.*)')}$`);
+    const match = path.match(sourcePattern);
+    if (match) return rewrite.destination.replace(':path*', match[1]);
   }
-  return response;
+  return null;
 }
 
-test('proxies session cookies, origin, CSRF headers, query, and Set-Cookie responses', async (t) => {
-  const priorBackend = process.env.BACKEND_API_URL;
-  process.env.BACKEND_API_URL = 'https://crop-api.example';
-  t.after(() => {
-    if (priorBackend === undefined) delete process.env.BACKEND_API_URL;
-    else process.env.BACKEND_API_URL = priorBackend;
-  });
-
-  let target;
-  let forwardedHeaders;
-  const priorFetch = globalThis.fetch;
-  globalThis.fetch = async (url, options) => {
-    target = url.toString();
-    forwardedHeaders = options.headers;
-    const headers = new Headers({ 'content-type': 'application/json' });
-    headers.append('set-cookie', 'JSESSIONID=session; Path=/; HttpOnly; Secure; SameSite=Lax');
-    headers.append('set-cookie', 'XSRF-TOKEN=csrf; Path=/; Secure; SameSite=Lax');
-    return new Response('{"ok":true}', { status: 200, headers });
-  };
-  t.after(() => {
-    globalThis.fetch = priorFetch;
-  });
-
-  const response = await runHandler(makeRequest({
-    method: 'POST',
-    url: '/api/crops?include=summary',
-    headers: {
-      cookie: 'JSESSIONID=session',
-      host: 'app.example',
-      origin: 'https://app.example',
-      'x-xsrf-token': 'csrf',
-    },
-    body: '{"cropName":"Wheat"}',
-  }));
-
-  assert.equal(target, 'https://crop-api.example/api/crops?include=summary');
-  assert.equal(forwardedHeaders.get('cookie'), 'JSESSIONID=session');
-  assert.equal(forwardedHeaders.get('origin'), 'https://app.example');
-  assert.equal(forwardedHeaders.get('x-xsrf-token'), 'csrf');
-  assert.equal(forwardedHeaders.get('host'), null);
-  assert.equal(response.statusCode, 200);
-  assert.deepEqual(response.getHeader('set-cookie'), [
-    'JSESSIONID=session; Path=/; HttpOnly; Secure; SameSite=Lax',
-    'XSRF-TOKEN=csrf; Path=/; Secure; SameSite=Lax',
-  ]);
-  assert.equal(response.bodyText(), '{"ok":true}');
+test('Vercel forwards the frontend CSRF URL to the exact Spring endpoint', () => {
+  assert.equal(
+    rewritePath('/api/auth/csrf'),
+    'https://crop-harvesting-backend.onrender.com/api/auth/csrf',
+  );
 });
 
-test('does not call a backend when its production origin is not configured', async (t) => {
-  const priorBackend = process.env.BACKEND_API_URL;
-  delete process.env.BACKEND_API_URL;
-  t.after(() => {
-    if (priorBackend !== undefined) process.env.BACKEND_API_URL = priorBackend;
-  });
-
-  const response = await runHandler(makeRequest());
-  assert.equal(response.statusCode, 503);
-  assert.deepEqual(JSON.parse(response.bodyText()), {
-    error: 'The backend API proxy is not configured.',
-  });
+test('Vercel forwards crop and harvest URLs without adding another API prefix', () => {
+  assert.equal(
+    rewritePath('/api/crops/42'),
+    'https://crop-harvesting-backend.onrender.com/api/crops/42',
+  );
+  assert.equal(
+    rewritePath('/api/harvests/7'),
+    'https://crop-harvesting-backend.onrender.com/api/harvests/7',
+  );
 });
 
-test('rejects an insecure backend origin', async (t) => {
-  const priorBackend = process.env.BACKEND_API_URL;
-  process.env.BACKEND_API_URL = 'http://crop-api.example';
-  t.after(() => {
-    if (priorBackend === undefined) delete process.env.BACKEND_API_URL;
-    else process.env.BACKEND_API_URL = priorBackend;
-  });
-
-  const response = await runHandler(makeRequest());
-  assert.equal(response.statusCode, 500);
-  assert.deepEqual(JSON.parse(response.bodyText()), {
-    error: 'BACKEND_API_URL must be a valid HTTPS origin without credentials or a path.',
-  });
+test('Vercel configuration contains a single same-origin API proxy rule', () => {
+  assert.equal(config.rewrites.length, 1);
+  assert.equal(config.rewrites[0].source, '/api/:path*');
+  assert.equal(
+    new URL(config.rewrites[0].destination.replace(':path*', 'auth/csrf')).pathname,
+    '/api/auth/csrf',
+  );
 });
